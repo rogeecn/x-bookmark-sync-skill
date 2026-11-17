@@ -23,6 +23,7 @@ references/layout.md     排版规范：每个字段为什么在这里、反模�
 scripts/render.py        推特 JSON → memo markdown（纯函数、可预览、可单测）
 scripts/sync.py          编排：seed / plan / publish / render
 scripts/test_render.py   排版回归测试（42 条，不联网）
+scripts/test_sync.py     编排层测试（6 条：id 提取、台账降级/重试）
 evals/evals.json         触发与行为评测用例
 ```
 
@@ -62,4 +63,16 @@ https://github.com/…
 - **t.co 只在 1:1 匹配时展开**：twitter-cli 常出现 `urls` 数量 ≠ 短链数量，按序硬替换会把句子指向错误站点。
 - **标题用 `###` 而非 `#`/`##`**：memos v0.30 里 h3 才是「卡片标题」的字号档，h1/h2 会压过相邻卡片。
 - **图片热链，不下载上传**：`?name=large` 拿 1200px 版本，附件会撑爆 instance 存储。
+- **台账读失败不阻塞发布**：首次读失败会重试（Cloudflare 会掐 keep-alive 连接）；仍失败则降级到 memo 扫描，memo 发成功后台账写失败只 warn —— 不能让已发出的 memo 被报成失败。
 - **自动抽不出标题时就不给标题**（约 8% 的长单段推文），由 agent 在 `plan.json` 里补写；空标题好过假标题。
+
+## 测试
+
+```bash
+python3 scripts/test_render.py   # 排版（42 条）
+python3 scripts/test_sync.py     # id 提取与台账容错（6 条，含 3 秒重试等待）
+```
+
+## License
+
+MIT
