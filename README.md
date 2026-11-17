@@ -4,6 +4,14 @@ X（Twitter）书签 → Memos，增量同步，一条书签一张卡片。
 
 本 skill 只做**编排**与**排版**：数据来自 [twitter-cli](https://github.com/public-clis/twitter-cli)，发布走 [memos skill](https://github.com/rogeecn/memos-skill)，去重台账用 [cf-id-ledger](https://github.com/rogeecn/cf-id-ledger) 的 id-ledger-query 接口。
 
+## 安装
+
+```bash
+git clone https://github.com/rogeecn/x-bookmark-sync-skill.git ~/.agents/skills/x-bookmark-sync
+```
+
+任何加载 `~/.agents/skills` 的 agent runtime 都能用（Claude Code 的 `~/.claude/skills`、pi 的 `~/.pi/agent/skills` 同理，脚本会自动探测 memos skill 的位置）。
+
 ## 快速开始
 
 ```bash

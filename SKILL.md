@@ -15,12 +15,14 @@ description: Sync X (Twitter) bookmarks into Memos as designed cards, incrementa
 | [memos skill](https://github.com/rogeecn/memos-skill) | 发布、列表、标签解析 | `python3 <memos>/scripts/memos.py publish --file - --json` |
 | [id-ledger-query](https://github.com/rogeecn/cf-id-ledger/tree/main/skills/id-ledger-query) | 已同步 id 台账 | `Ledger` 类（`scripts/sync.py`），`POST/GET /v1/projects/<key>/ids` |
 
+本 skill 不绑定某个 agent runtime：放进任意 skills 目录即可（`~/.agents/skills/`、`~/.claude/skills/`、`~/.pi/agent/skills/`），脚本靠 `MEMOS_SKILL` / `TWITTER_CLI` 或按顺序探测来定位依赖。
+
 ## 第一次使用（每个 instance 只需一次）
 
 ```bash
 # 1. 依赖在位
 twitter status                        # twitter-cli 已登录
-python3 ~/.pi/agent/skills/memos/scripts/memos.py list -n 1 --json   # memos 已配置
+python3 ~/.agents/skills/memos/scripts/memos.py list -n 1 --json   # memos 已配置
 
 # 2. 环境变量
 #    MEMOS_URL / MEMOS_API_KEY           （memos skill 用）

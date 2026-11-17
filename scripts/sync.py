@@ -71,8 +71,9 @@ def memos_script(explicit: str | None) -> Path:
     return find_script(
         explicit,
         [
-            "~/.pi/agent/skills/memos/scripts/memos.py",
             "~/.agents/skills/memos/scripts/memos.py",
+            "~/.pi/agent/skills/memos/scripts/memos.py",  # same layout, older pi home
+            "~/.claude/skills/memos/scripts/memos.py",
         ],
         "MEMOS_SKILL",
         "memos skill CLI",
