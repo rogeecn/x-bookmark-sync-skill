@@ -1,0 +1,41 @@
+{
+  "skill_name": "x-bookmark-sync",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "把 X 上最近的书签同步到 memos",
+      "expected_output": "串起 seed（若台账为空）→ plan --count N → publish。plan.json 存在，publish 报告里 published 数量与计划一致；memo 正文以 `### 标题` 开头、byline 含指标与时间、末行是 `#Twitter #Bookmark`。不重复发布任何已存在的 memo。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "有没有新的书签要同步？只看看，先别发",
+      "expected_output": "只跑 plan（不跑 publish），报告 new 的数量和 counts 三项（bookmarks / synced_ledger / synced_memos / new），说明新增几条、去重命中了多少。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "检查一下最近的书签里有没有漏同步的",
+      "expected_output": "解释去重是「台账 ∪ memo 正文扫描」两个来源；必要时跑 seed 回填台账；列出仍为 new 的 tweet id 与标题，并区分「没有新书签」与「全部命中已同步」两种情形。",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "这条 memo 排版太丑了，重新排一下：https://m.ipao.vip/m/MTkJ7v5P94bpeRmf3qHywg",
+      "expected_output": "读 references/layout.md 的反模式与验收清单，指出具体问题（标题层级/重复首行/裸 URL 未成段/图片没 ?name=large/引用块某行缺 `>` 等），用 render.py 出稿后重发或更新，给出验收清单逐条确认。",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "同步时给我把每条书签的标题写得像人话，别千篇一律",
+      "expected_output": "在 plan 与 publish 之间介入：读 plan.json 的 title/text，把机器截断的标题换成 ≤30 字的概括，保留 suggested_tags 中有区分度的 1-2 个，不编造推文里没有的事实；不设 status=skip 掉有内容的书签。",
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "同步到 memos 的卡片太长了，列表里刷不动",
+      "expected_output": "在不丢信息的前提下压缩可见区：长文继续用 <details> 折叠、链接区收敛成裸 URL 段（让 memos 出预览卡）、必要时不写标题；保留 [原推] 与标签行（去重与可回溯依赖它）。明确说明不能删掉 id 链接。",
+      "files": []
+    }
+  ]
+}

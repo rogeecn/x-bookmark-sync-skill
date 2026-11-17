@@ -1,0 +1,14 @@
+# Runtime artifacts (plans and reports are per-run snapshots, not source)
+plan*.json
+report*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Tooling caches
+.codegraph/
+.unipi/
+.DS_Store
