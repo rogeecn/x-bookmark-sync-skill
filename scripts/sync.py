@@ -520,6 +520,12 @@ def cmd_repair(args) -> int:
     for memo in memos_list(memos, args.scan_limit, args.tag):
         text = memo_text(memo)
         tweet_id = memo_subject_id(text)
+        if args.in_place:
+            # text surgery only: no tweet object needed, so old memos qualify too
+            if "https://t.co/" not in text and render.normalize_byline(text) == text and not args.force:
+                continue
+            candidates.append((memo, tweets.get(tweet_id or ""), text))
+            continue
         if args.links_only:
             if "https://t.co/" not in text:
                 continue
@@ -543,7 +549,9 @@ def cmd_repair(args) -> int:
     for index, (memo, tweet, text) in enumerate(candidates, 1):
         memo_ref = memo_id(memo)
         try:
-            if args.links_only:
+            if args.in_place:
+                markdown = render.normalize_byline(render.rewrite_links(text, links))
+            elif args.links_only:
                 # historical memos open with the author link; only the stubs are rewritten
                 markdown = render.rewrite_links(text, links)
             else:
@@ -728,6 +736,7 @@ def build_parser() -> argparse.ArgumentParser:
     repair.add_argument("--limit", type=int, help="repair at most N memos this run")
     repair.add_argument("--force", action="store_true", help="re-render even memos without t.co stubs")
     repair.add_argument("--links-only", action="store_true", help="only swap t.co for real URLs, keep the existing layout")
+    repair.add_argument("--in-place", action="store_true", help="text surgery on every memo: t.co + byline, layout untouched")
     repair.add_argument("--dry-run", action="store_true", help="print the new markdown instead of updating")
     repair.add_argument("--delay", type=float, default=0.3, help="seconds between updates (default: 0.3)")
     repair.add_argument("--proxy", help="proxy for t.co resolution (default: $TWITTER_PROXY)")

@@ -39,7 +39,7 @@ evals/evals.json         触发与行为评测用例
 
 ```
 ### 标题
-[@handle](https://x.com/handle) · 名字 ✓ · 11-16 11:36 · 👁6.4k 🔖186 ♥113 💬8 🔁13
+[@名字](https://x.com/handle) · 11-16 11:36
 
 正文（t.co 已换成真实地址）
 
@@ -63,7 +63,7 @@ https://github.com/…
 #Twitter #Bookmark #github
 ```
 
-比历史同步多出来的东西：热度指标、发布时间、认证标记、转发标记、**引用推全文**、视频链接与尺寸、**展开后的真实链接**（跟着 t.co 的 301 走，实测 280/280 命中，渲染成预览卡）、长文全文、可被后续去重扫描的 tweet id。
+比历史同步多出来的东西：名字当链接文字（handle 只作 href）、发布时间、转发标记、**引用推全文**、视频链接与尺寸、**展开后的真实链接**（跟着 t.co 的 301 走，实测 280/280 命中，渲染成预览卡）、长文全文、可被后续去重扫描的 tweet id。
 
 ## 设计取舍
 
@@ -93,6 +93,7 @@ MIT
 python3 scripts/sync.py repair --dry-run --limit 2   # 看稿
 python3 scripts/sync.py repair                       # 重渲染（保留原标题、标签、存档日期）
 python3 scripts/sync.py repair --links-only          # 只换 t.co，排版一个字不动
+python3 scripts/sync.py repair --in-place            # 文本手术：短链 + 头部（名字/时间，去掉指标与 ✓）
 ```
 
 `repair` 默认只处理「推文还在当前书签列表里」的 memo（排版需要完整 tweet 对象，逐条 `twitter tweet` 又慢又不全）；`--links-only` 不受这个限制，因为换短链只需要 memo 自己的正文。实测 823 条 memo：104 条换成新排版，324 条只换了短链，全库 t.co 归零。

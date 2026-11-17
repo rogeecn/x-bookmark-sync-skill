@@ -168,6 +168,44 @@ def unused_links(text: str, urls: list[str] | None, tweet_id: str) -> list[str]:
     return result
 
 
+BYLINE_LINK_RE = re.compile(
+    r"^(?P<rt>🔁 @\S+ · )?\[@([^\]]+)\]\((https?://x\.com/[^)\s]+)\)\s*(?P<rest>.*)$"
+)
+POSTED_RE = re.compile(r"\d{2}-\d{2} \d{2}:\d{2}")
+
+
+def normalize_byline(text: str) -> str:
+    """Rewrite an existing memo's byline to `[@名字](profile) · 时间`, in place.
+
+    Works for both shapes: historical memos start with the author link, new cards
+    put it under the headline. The display name is the token between the link and
+    the timestamp; everything else on that line (✓, views, likes, …) is dropped.
+    """
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        found = BYLINE_LINK_RE.match(line.strip())
+        if not found:
+            continue
+        rest = found.group("rest")
+        stamp = POSTED_RE.search(rest)
+        label = ""
+        if stamp:
+            before = rest[: stamp.start()].strip()
+            token = next((part.strip() for part in before.split("·") if part.strip()), "")
+            label = clean_label(token)
+        elif "·" in rest:
+            label = clean_label(rest.split("·")[1])
+        parts = []
+        if found.group("rt"):
+            parts.append(found.group("rt").strip(" ·"))
+        parts.append(f"[@{label or found.group(2)}]({found.group(3)})")
+        if stamp:
+            parts.append(stamp.group(0))
+        lines[index] = " · ".join(parts)
+        return "\n".join(lines)
+    return text
+
+
 def rewrite_links(text: str, links: dict[str, str], tweet_ids: list[str] | None = None) -> str:
     """Stub-only repair: swap t.co targets inside an existing memo, layout untouched.
 
@@ -272,6 +310,11 @@ def suggest_tags(tweet: dict) -> list[str]:
         if re.search(pattern, haystack, re.I):
             tags.append(tag)
     return tags[:3]
+
+
+def clean_label(value: str | None) -> str:
+    """Display names can carry brackets; markdown link text must not break on them."""
+    return (value or "").replace("[", "(").replace("]", ")").replace("✓", "").strip()
 
 
 def metrics_line(tweet: dict) -> str:
@@ -390,6 +433,7 @@ def render_tweet(
     saved_at: datetime | None = None,
     auto_tags: bool = False,
     links: dict[str, str] | None = None,
+    show_metrics: bool = False,
 ) -> str:
     saved_at = saved_at or datetime.now(timezone.utc)
     author = tweet.get("author") or {}
@@ -416,18 +460,20 @@ def render_tweet(
     if headline:
         blocks.append(f"### {headline}")
 
-    # 2. Byline: who, when, and how much signal the tweet carried.
+    # 2. Byline: who and when, nothing else. The name is the thing readers recognise;
+    # the handle stays as the href, and the engagement counts are noise while scanning.
     byline = []
     if tweet.get("isRetweet") and tweet.get("retweetedBy"):
         byline.append(f"🔁 @{tweet['retweetedBy']}")
     if handle:
-        byline.append(f"[@{handle}](https://x.com/{handle})")
-    if name and name.strip().casefold() != handle.casefold():
-        byline.append(f"{name} ✓" if author.get("verified") else name)
+        byline.append(f"[@{clean_label(name) or handle}](https://x.com/{handle})")
+    elif name:
+        byline.append(clean_label(name))
     byline.append(posted_at(tweet, saved_at))
-    metrics = metrics_line(tweet)
-    if metrics:
-        byline.append(metrics)
+    if show_metrics:
+        counts = metrics_line(tweet)
+        if counts:
+            byline.append(counts)
     blocks.append(" · ".join(part for part in byline if part))
 
     # 3. The tweet itself, links expanded when the pairing was trustworthy.
@@ -493,6 +539,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--article", help="markdown file of the tweet's article, folded into the card")
     parser.add_argument("--auto-tags", action="store_true", help="append suggested topic tags")
     parser.add_argument("--links", help="JSON file of resolved t.co -> real URL")
+    parser.add_argument("--metrics", action="store_true", help="append engagement counts to the byline")
     parser.add_argument("--json", action="store_true", help="emit [{id, markdown}] instead of raw markdown")
     args = parser.parse_args(argv)
 
@@ -521,6 +568,7 @@ def main(argv: list[str] | None = None) -> int:
                 article=article,
                 auto_tags=args.auto_tags,
                 links=links,
+                show_metrics=args.metrics,
             ),
         }
         for tweet in tweets

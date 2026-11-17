@@ -81,7 +81,7 @@ python3 scripts/sync.py publish --plan plan.json
 
 ```
 ### 标题                                    ← h3：memos 里「卡片标题」那一档，h1/h2 会压过相邻卡片
-[@handle](url) · 名字 ✓ · 11-16 19:36 · 👁6.4k 🔖186 ♥113
+[@名字](https://x.com/handle) · 11-16 19:36      ← 名字当链接文字，handle 只留作 href；不显示热度
 正文（t.co 已换成真实地址）
 > **@引用作者** 名字 · [引用](url)          ← 转推的实体，历史同步只贴链接，价值损失最大
 > 引用正文
@@ -128,6 +128,12 @@ python3 scripts/sync.py repair                        # 保留原标题/标签/�
 
 # 只想把旧 memo 里的 t.co 换成真实地址，排版一个字不动
 python3 scripts/sync.py repair --links-only --limit 50
+
+# 只做文本手术：短链 + 头部（[@名字](profile) · 时间），排版结构不动
+python3 scripts/sync.py repair --in-place
+
+# 需要 byline 带热度指标（默认关：扫读时是噪音）
+python3 scripts/sync.py render --plan plan.json --metrics
 
 # 想要机器自动补主题标签（默认关：标签是判断，不是正则的活）
 python3 scripts/sync.py publish --plan plan.json --auto-tags

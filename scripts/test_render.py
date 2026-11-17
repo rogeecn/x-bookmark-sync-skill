@@ -161,6 +161,34 @@ class Media(unittest.TestCase):
         self.assertIn("1920×1080", blocks[0])
 
 
+class BylineRewrite(unittest.TestCase):
+    """Existing memos get the same byline without a re-render or a source tweet."""
+
+    def test_old_byline_collapses_to_name_and_time(self):
+        text = "[@Khazix0918](https://x.com/Khazix0918) · 数字生命卡兹克 ✓ · 11-16 09:59 · 👁17.4万 🔖3.8k ♥3.5k 💬169 🔁425 ❝54\n\n正文"
+        self.assertEqual(
+            render.normalize_byline(text),
+            "[@数字生命卡兹克](https://x.com/Khazix0918) · 11-16 09:59\n\n正文",
+        )
+
+    def test_rewrite_works_under_a_headline(self):
+        text = "### 标题\n\n[@dotey](https://x.com/dotey) · 宝玉 ✓ · 08-06 16:30 · 👁12.8万\n\n正文"
+        self.assertIn("[@宝玉](https://x.com/dotey) · 08-06 16:30", render.normalize_byline(text))
+
+    def test_byline_without_time_or_name_is_left_alone(self):
+        text = "[@zalegzl](https://x.com/zalegzl)\n\n正文"
+        self.assertEqual(render.normalize_byline(text), text)
+
+    def test_retweet_marker_survives(self):
+        text = "🔁 @rep · [@other](https://x.com/other) · Some Name ✓ · 11-16 09:59 · 👁1"
+        self.assertEqual(render.normalize_byline(text), "🔁 @rep · [@Some Name](https://x.com/other) · 11-16 09:59")
+
+    def test_idempotent(self):
+        text = "[@a](https://x.com/a) · 名字 · 11-16 09:59 · 👁1"
+        once = render.normalize_byline(text)
+        self.assertEqual(render.normalize_byline(once), once)
+
+
 class Quoting(unittest.TestCase):
     def test_quote_that_evaporates_is_not_rendered(self):
         quote = {"id": "444", "text": "https://t.co/self", "author": {"screenName": "a", "name": "A"}}
@@ -207,18 +235,23 @@ class FullCard(unittest.TestCase):
     def test_headline_not_duplicated_in_body(self):
         self.assertEqual(self.md.count("这个动画库可以啊"), 1)
 
-    def test_byline_has_handle_time_and_metrics(self):
+    def test_byline_is_name_and_time_only(self):
+        """The name is what readers recognise; counts are noise while scanning a list."""
         byline = self.md.split("\n")[2]
-        self.assertIn("[@kokonutlabs](https://x.com/kokonutlabs)", byline)
-        self.assertIn("11-16 11:36", byline)
-        self.assertIn("👁6.4k", byline)
-        self.assertIn("🔖186", byline)
-        self.assertFalse(byline.endswith("·"))
+        self.assertEqual(byline, "[@Kokonut](https://x.com/kokonutlabs) · 11-16 11:36")
 
-    def test_zero_metrics_are_dropped(self):
-        md = render.render_tweet(tweet(metrics={"views": 0, "likes": 3}), saved_at=SAVED_AT)
+    def test_metrics_are_opt_in(self):
+        md = render.render_tweet(tweet(), saved_at=SAVED_AT, show_metrics=True)
+        self.assertIn("👁6.4k", md)
+        self.assertIn("🔖186", md)
+
+    def test_zero_metrics_are_dropped_when_asked_for(self):
+        md = render.render_tweet(tweet(metrics={"views": 0, "likes": 3}), saved_at=SAVED_AT, show_metrics=True)
         self.assertIn("♥3", md)
         self.assertNotIn("👁", md)
+
+    def test_handle_is_only_the_href(self):
+        self.assertNotIn("@kokonutlabs)", self.md.split("\n")[2].replace("](https://x.com/kokonutlabs)", ""))
 
     def test_short_link_expanded_and_not_billed_twice(self):
         self.assertIn("https://github.com/kokonut-labs/kokonutui", self.md)
@@ -237,14 +270,19 @@ class FullCard(unittest.TestCase):
         md = render.render_tweet(tweet(isRetweet=True, retweetedBy="someone"), saved_at=SAVED_AT)
         self.assertIn("🔁 @someone", md)
 
-    def test_verified_mark(self):
+    def test_verified_mark_is_gone(self):
         md = render.render_tweet(tweet(author={"name": "Kokonut Labs", "screenName": "k", "verified": True}), saved_at=SAVED_AT)
-        self.assertIn("Kokonut Labs ✓", md)
+        self.assertIn("[@Kokonut Labs](https://x.com/k)", md)
+        self.assertNotIn("✓", md)
+
+    def test_brackets_in_display_name_do_not_break_the_link(self):
+        md = render.render_tweet(tweet(author={"name": "阿川 | AI [thinking]", "screenName": "ai"}), saved_at=SAVED_AT)
+        self.assertIn("[@阿川 | AI (thinking)](https://x.com/ai)", md)
 
     def test_name_equal_to_handle_is_not_repeated(self):
         md = render.render_tweet(tweet(author={"name": "KokonutLabs", "screenName": "kokonutlabs"}), saved_at=SAVED_AT)
-        self.assertIn("[@kokonutlabs](https://x.com/kokonutlabs) · ", md)
-        self.assertNotIn("KokonutLabs", md)
+        self.assertIn("[@KokonutLabs](https://x.com/kokonutlabs) · ", md)
+        self.assertEqual(md.count("KokonutLabs"), 1)
 
     def test_own_headings_demoted(self):
         md = render.render_tweet(tweet(text="开头一句\n\n## 原文小标题\n\n正文内容在这里，足够长了吧"), saved_at=SAVED_AT)
