@@ -41,7 +41,7 @@ evals/evals.json         触发与行为评测用例
 ### 标题
 [@handle](https://x.com/handle) · 名字 ✓ · 11-16 11:36 · 👁6.4k 🔖186 ♥113 💬8 🔁13
 
-正文（t.co 已在 1:1 匹配时展开）
+正文（t.co 已换成真实地址）
 
 > **@引用作者** 名字 · [引用](https://x.com/…/status/…)
 >
@@ -63,12 +63,12 @@ https://github.com/…
 #Twitter #Bookmark #github
 ```
 
-比历史同步多出来的东西：热度指标、发布时间、认证标记、转发标记、**引用推全文**、视频链接与尺寸、**展开后的真实链接（渲染成预览卡）**、长文全文、可被后续去重扫描的 tweet id。
+比历史同步多出来的东西：热度指标、发布时间、认证标记、转发标记、**引用推全文**、视频链接与尺寸、**展开后的真实链接**（跟着 t.co 的 301 走，实测 280/280 命中，渲染成预览卡）、长文全文、可被后续去重扫描的 tweet id。
 
 ## 设计取舍
 
 - **去重用「台账 ∪ memo 正文扫描」**：台账快，memo 扫描是地面真相（台账丢了、项目 key 错了、别的工具发过，都不会重复发）。
-- **t.co 只在 1:1 匹配时展开**：twitter-cli 常出现 `urls` 数量 ≠ 短链数量，按序硬替换会把句子指向错误站点。
+- **t.co 靠 301 解析，不靠 `urls[]` 顺序**：twitter-cli 常出现 `urls` 数量 ≠ 短链数量（200 条书签里 100 条如此），按序硬替换会把句子指向错误站点。解析结果进缓存 `~/.cache/x-bookmark-sync/tco.json`，指向自身推文的链接、`x.com/i/…` 导航页直接删。
 - **标题用 `###` 而非 `#`/`##`**：memos v0.30 里 h3 才是「卡片标题」的字号档，h1/h2 会压过相邻卡片。
 - **图片热链，不下载上传**：`?name=large` 拿 1200px 版本，附件会撑爆 instance 存储。
 - **台账读失败不阻塞发布**：首次读失败会重试（Cloudflare 会掐 keep-alive 连接）；仍失败则降级到 memo 扫描，memo 发成功后台账写失败只 warn —— 不能让已发出的 memo 被报成失败。
@@ -84,3 +84,15 @@ python3 scripts/test_sync.py     # id 提取与台账容错（6 条，含 3 秒�
 ## License
 
 MIT
+
+## 旧 memo 的原地翻新
+
+`repair` 不重新发布，只改已有 memo：
+
+```bash
+python3 scripts/sync.py repair --dry-run --limit 2   # 看稿
+python3 scripts/sync.py repair                       # 重渲染（保留原标题、标签、存档日期）
+python3 scripts/sync.py repair --links-only          # 只换 t.co，排版一个字不动
+```
+
+`repair` 默认只处理「推文还在当前书签列表里」的 memo（排版需要完整 tweet 对象，逐条 `twitter tweet` 又慢又不全）；`--links-only` 不受这个限制，因为换短链只需要 memo 自己的正文。实测 823 条 memo：104 条换成新排版，324 条只换了短链，全库 t.co 归零。

@@ -41,6 +41,39 @@ class IdExtraction(unittest.TestCase):
         self.assertEqual(sync.LEADING_ID_RE.match(text.split("\n")[0]).group(1), "333")
 
 
+class StubResolution(unittest.TestCase):
+    """t.co resolution must be cache-first and must never invent a target."""
+
+    def setUp(self):
+        self._saved = sync.LINK_CACHE
+        self._tmp = Path("/tmp") / "x-bookmark-sync-test-tco.json"
+        self._tmp.unlink(missing_ok=True)
+        sync.LINK_CACHE = self._tmp
+
+    def tearDown(self):
+        self._tmp.unlink(missing_ok=True)
+        sync.LINK_CACHE = self._saved
+
+    def test_cache_hit_skips_the_network(self):
+        with self._tmp.open("w", encoding="utf-8") as handle:
+            handle.write('{"https://t.co/known": "https://real.dev"}')
+        self.assertEqual(
+            sync.resolve_stubs(["https://t.co/known"], "socks5://127.0.0.1:1"),
+            {"https://t.co/known": "https://real.dev"},
+        )
+
+    def test_no_proxy_returns_nothing_instead_of_guessing(self):
+        self.assertEqual(sync.resolve_stubs(["https://t.co/unknown"], None), {})
+
+    def test_socks5_becomes_socks5h_so_dns_happens_at_the_proxy(self):
+        self.assertEqual(sync._proxy_url("socks5://host:1080"), "socks5h://host:1080")
+        self.assertEqual(sync._proxy_url("http://host:8080"), "http://host:8080")
+
+    def test_stubs_are_collected_from_tweet_and_quote(self):
+        tweets = [{"text": "a https://t.co/one", "quotedTweet": {"text": "b https://t.co/two"}}]
+        self.assertEqual(sync.tweet_stubs(tweets), ["https://t.co/one", "https://t.co/two"])
+
+
 class LedgerResilience(unittest.TestCase):
     """A flaky ledger must never turn a published memo into a reported failure."""
 

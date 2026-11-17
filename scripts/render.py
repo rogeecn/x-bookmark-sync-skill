@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 # t.co shortener: twitter-cli exposes expanded targets in `urls` only sometimes,
 # so expansion is best-effort and never rewrites text it cannot map.
 TCO_RE = re.compile(r"https?://t\.co/[A-Za-z0-9]+")
+# x.com navigation the stub can resolve to (login walls, onboarding, article shells): not content.
+INTERNAL_X_RE = re.compile(r"https?://(?:x|twitter)\.com/(?:i/|login|settings|home)\S*")
 # Media is rendered from `media`, so links back to it are dropped from the link list.
 MEDIA_HOST_RE = re.compile(r"^https?://(?:pbs|video)\.twimg\.com/", re.I)
 # A link to the tweet itself, or to another tweet, is provenance, not a resource.
@@ -105,22 +107,46 @@ def normalize_tag(tag: str) -> str:
 # --------------------------------------------------------------- mining layers
 
 
-def expand_links(text: str, urls: list[str] | None) -> tuple[str, list[str]]:
-    """Swap t.co stubs for their real target, but only on an exact 1:1 order match.
+def expand_links(
+    text: str, urls: list[str] | None, links: dict[str, str] | None = None
+) -> tuple[str, list[str]]:
+    """Swap t.co stubs for the real target, so no link in a memo points at t.co.
 
-    twitter-cli sometimes reports fewer (or no) expanded URLs than the text has
-    stubs, and a wrong pairing would silently point a sentence at the wrong
-    site. On any mismatch the stubs stay (they still redirect) and the known
-    expansions are listed as link cards instead.
+    `links` is a resolved stub -> target map (sync.py builds it by following the
+    redirect through the proxy). Without it we fall back to pairing the stubs
+    with twitter-cli's expanded URLs, but only on an exact 1:1 count: twitter-cli
+    reports fewer expansions than the text has stubs more often than not, and a
+    wrong pairing would silently point a sentence at the wrong site.
     """
     urls = [u for u in (urls or []) if u]
-    if not urls:
-        return text, []
-    non_media = [u for u in urls if not MEDIA_HOST_RE.match(u)]
-    if len(TCO_RE.findall(text)) != len(urls):
-        return text, non_media
-    remaining = iter(urls)
-    return TCO_RE.sub(lambda _match: next(remaining), text), non_media
+    known = {stub: target for stub, target in (links or {}).items() if target}
+    if not known and urls:
+        stubs = TCO_RE.findall(text)
+        if len(stubs) == len(urls):
+            known = dict(zip(stubs, urls))
+    if known:
+        text = TCO_RE.sub(lambda match: known.get(match.group(0), match.group(0)), text)
+    return text, [u for u in urls if not MEDIA_HOST_RE.match(u)]
+
+
+def strip_self_links(text: str, tweet_ids: list[str] | tuple[str, ...]) -> str:
+    """Drop links that resolve back to the tweet already on the card.
+
+    A stub at the end of a tweet almost always points at that tweet's own video
+    or photo; expanding it would append a link to the card itself. The media
+    block and the quote block already carry those, so the token goes away.
+    """
+    def blank(match: re.Match) -> str:
+        # `[@who](https://x.com/who/status/123)` is attribution, not a stray self-link
+        return match.group(0) if match.string[max(0, match.start() - 2) : match.start()] == "](" else ""
+
+    for tweet_id in tweet_ids:
+        if not tweet_id:
+            continue
+        pattern = re.compile(rf"https?://(?:x|twitter)\.com/[^/\s)]+/status/{tweet_id}[^)\s]*")
+        text = pattern.sub(blank, text)
+    text = INTERNAL_X_RE.sub("", text)
+    return "\n".join(line.rstrip() for line in text.split("\n"))
 
 
 def unused_links(text: str, urls: list[str] | None, tweet_id: str) -> list[str]:
@@ -140,6 +166,18 @@ def unused_links(text: str, urls: list[str] | None, tweet_id: str) -> list[str]:
             continue
         result.append(url)
     return result
+
+
+def rewrite_links(text: str, links: dict[str, str], tweet_ids: list[str] | None = None) -> str:
+    """Stub-only repair: swap t.co targets inside an existing memo, layout untouched.
+
+    Used for historical memos whose tweet object is gone — the layout is not
+    ours to redo, but a dead short link is still worth fixing.
+    """
+    known = {stub: target for stub, target in (links or {}).items() if target}
+    if known:
+        text = TCO_RE.sub(lambda match: known.get(match.group(0), match.group(0)), text)
+    return strip_self_links(text, tweet_ids or [])
 
 
 def split_lead(text: str) -> tuple[str, str]:
@@ -292,9 +330,14 @@ def media_blocks(tweet: dict) -> list[str]:
     return photos + videos
 
 
-def quoted_block(tweet: dict) -> str:
+def quoted_block(tweet: dict, links: dict[str, str] | None = None) -> str:
     quoted = tweet.get("quotedTweet") or {}
     text = (quoted.get("text") or "").strip()
+    if text:
+        text, _ = expand_links(text, quoted.get("urls"), links)
+        text = strip_self_links(text, [str(quoted.get("id") or "")]).strip()
+    if not text:
+        return ""
     if not text:
         return ""
     author = quoted.get("author") or {}
@@ -346,14 +389,15 @@ def render_tweet(
     article: str | None = None,
     saved_at: datetime | None = None,
     auto_tags: bool = False,
+    links: dict[str, str] | None = None,
 ) -> str:
     saved_at = saved_at or datetime.now(timezone.utc)
     author = tweet.get("author") or {}
     handle = (author.get("screenName") or "").strip()
     name = (author.get("name") or "").strip()
 
-    text, leftover = expand_links(tweet.get("text") or "", tweet.get("urls"))
-    text = squeeze(text)
+    text, leftover = expand_links(tweet.get("text") or "", tweet.get("urls"), links)
+    text = squeeze(strip_self_links(text, [str(tweet.get("id") or "")]))
     article_title = (tweet.get("articleTitle") or "").strip()
 
     lead, rest = split_lead(text)
@@ -391,7 +435,7 @@ def render_tweet(
         blocks.append(demote_headings(body))
 
     # 4. What it was reacting to: usually where the substance is.
-    quoted = quoted_block(tweet)
+    quoted = quoted_block(tweet, links)
     if quoted:
         blocks.append(quoted)
 
@@ -426,12 +470,6 @@ def render_tweet(
 
 
 def load_tweets(args) -> list[dict]:
-    if args.id:
-        raw = json.load(sys.stdin)
-        data = raw.get("data", raw) if isinstance(raw, dict) else raw
-        if isinstance(data, dict):
-            data = [data]
-        return [item for item in data if str(item.get("id")) == str(args.id)]
     if args.file:
         with open(args.file, encoding="utf-8") as handle:
             raw = json.load(handle)
@@ -440,7 +478,10 @@ def load_tweets(args) -> list[dict]:
     data = raw.get("data", raw) if isinstance(raw, dict) else raw
     if isinstance(data, dict):
         data = data.get("items", [data])
-    return list(data)
+    items = list(data)
+    if args.id:
+        items = [item for item in items if str(item.get("id")) == str(args.id)]
+    return items
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -451,6 +492,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tag", action="append", default=[], help="extra topic tag (repeatable)")
     parser.add_argument("--article", help="markdown file of the tweet's article, folded into the card")
     parser.add_argument("--auto-tags", action="store_true", help="append suggested topic tags")
+    parser.add_argument("--links", help="JSON file of resolved t.co -> real URL")
     parser.add_argument("--json", action="store_true", help="emit [{id, markdown}] instead of raw markdown")
     args = parser.parse_args(argv)
 
@@ -458,6 +500,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.article:
         with open(args.article, encoding="utf-8") as handle:
             article = handle.read()
+
+    links = None
+    if args.links:
+        with open(args.links, encoding="utf-8") as handle:
+            links = json.load(handle)
 
     tweets = load_tweets(args)
     if not tweets:
@@ -473,6 +520,7 @@ def main(argv: list[str] | None = None) -> int:
                 tags=args.tag,
                 article=article,
                 auto_tags=args.auto_tags,
+                links=links,
             ),
         }
         for tweet in tweets

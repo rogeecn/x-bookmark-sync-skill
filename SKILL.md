@@ -82,7 +82,7 @@ python3 scripts/sync.py publish --plan plan.json
 ```
 ### 标题                                    ← h3：memos 里「卡片标题」那一档，h1/h2 会压过相邻卡片
 [@handle](url) · 名字 ✓ · 11-16 19:36 · 👁6.4k 🔖186 ♥113
-正文（t.co 在 1:1 匹配时展开）
+正文（t.co 已换成真实地址）
 > **@引用作者** 名字 · [引用](url)          ← 转推的实体，历史同步只贴链接，价值损失最大
 > 引用正文
 ![](pbs...jpg?name=large)                    ← name=large 才是大图，裸 URL 是缩略图
@@ -98,6 +98,17 @@ https://github.com/...                       ← 裸 URL 独占段落 → memos 
 
 只改排版时不要重新抓推文：`render --plan plan.json --id <id>` 就能出稿，改完 `publish` 前把该 item 的 `status` 改回 `"new"`（或直接 `--limit 1`），否则它会被当成已发布跳过。
 
+**短链必须是真实地址。** t.co 在 memo 里点开是短链，读者看不出要去哪，memos 的预览卡也只认目标域名。`plan` 会顺着每个 t.co 的 301 走一遍（走 `$TWITTER_PROXY`，实测 280/280 全部命中），结果写进 `plan.json` 的 `links`，`render` 在排版前替换。缓存落在 `~/.cache/x-bookmark-sync/tco.json`，第二次跑同一条链接不发请求。
+
+替换规则（`render.py` 里三个函数，都有测试）：
+
+| 情况 | 处理 |
+| --- | --- |
+| 短链解析到外部站点 | 原位替换成真实 URL，外面不加 `[文字](url)`，交给 memos 生成预览卡 |
+| 短链解析回**这条推文自己**（常见于视频/图片） | 整段删掉：媒体块和引用块已经在展示它，留着就是自己指自己 |
+| 短链指向 `x.com/i/…`、登录墙、onboarding | 删掉：那不是内容，是把读者挡在门外 |
+| 没有代理、解析失败 | 保留短链（仍可重定向），另有 `urls[]` 1:1 匹配的兜底 |
+
 ## 常用命令
 
 ```bash
@@ -110,6 +121,13 @@ python3 scripts/sync.py publish --plan plan.json --limit 2 --dry-run
 
 # 发前 5 条试水
 python3 scripts/sync.py publish --plan plan.json --limit 5
+
+# 已经发过的旧 memo 想换新排版：原地重渲染，不重新发布
+python3 scripts/sync.py repair --dry-run --limit 2   # 先看稿
+python3 scripts/sync.py repair                        # 保留原标题/标签/存档日期
+
+# 只想把旧 memo 里的 t.co 换成真实地址，排版一个字不动
+python3 scripts/sync.py repair --links-only --limit 50
 
 # 想要机器自动补主题标签（默认关：标签是判断，不是正则的活）
 python3 scripts/sync.py publish --plan plan.json --auto-tags
@@ -133,6 +151,8 @@ twitter bookmarks -n 20 --json | python3 scripts/render.py --id 2122286309855338
 | `plan` 的 `new` 为 0，但用户说「有新书签」 | 书签已被别的工具同步过，或 `--count` 太小 | 加大 `--count`；或 `seed` 确认台账里有它 |
 | 首次同步想发几百条 | 没跑 `seed`，或台账项目 key 不对 | 跑 `seed`；用 `--ledger-project` 确认 key（区分大小写） |
 | `publish` 报 HTTP 401/403 | memos 或台账 token 失效 | 重新配置 `MEMOS_API_KEY` / `ID_LEDGER_TOKEN`，本 skill 不碰凭证存储 |
+| 旧 memo 里还是 t.co | 发出去时还没做短链解析 | `repair --links-only`：只换链接，排版不动 |
+| `plan` 报 `no proxy` | 没配 `TWITTER_PROXY`，t.co 出不去 | 配代理，或接受短链降级（只做 `urls[]` 1:1 展开） |
 | 媒体图不显示 | 读者侧访问不到 `pbs.twimg.com` | 不要改成下载上传（本机同样出网受限）；改为在正文补一句图片描述 |
 | 某条 publish 失败 | 单条数据异常 | 循环不会中断，失败的 item 标 `failed` 写进 `sync-report.json`，修好数据后把它改回 `"new"` 重跑 |
 | 台账写入失败 | 台账服务抖动 | 默认降级：警告后继续（memo 扫描兜底），memo 已发出但 id 未记账 → 重跑 `seed` 补回；要强制失败加 `--strict-ledger` |
@@ -145,4 +165,4 @@ twitter bookmarks -n 20 --json | python3 scripts/render.py --id 2122286309855338
 python3 scripts/test_render.py     # 排版回归（纯函数，不联网）
 ```
 
-改了 `render.py` 或 `references/layout.md` 之后跑一遍；断言覆盖标题抽取、t.co 1:1 展开、链接区排除、媒体高分辨率、引用块每行 `>`、`<details>` 前后空行、标签去重。
+改了 `render.py` 或 `references/layout.md` 之后跑一遍；断言覆盖标题抽取、t.co 解析替换/自指删除/内部链接删除、链接区排除、媒体高分辨率、引用块每行 `>`、`<details>` 前后空行、标签去重。

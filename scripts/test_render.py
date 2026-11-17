@@ -101,6 +101,40 @@ class Links(unittest.TestCase):
         self.assertIn("t.co/aaa", text)
         self.assertIn("https://only-one.dev", links)
 
+    def test_resolved_stub_map_beats_the_counts(self):
+        """10 stubs vs 5 urls is the common case; the 301 map settles it without guessing."""
+        stubs = " ".join(f"https://t.co/s{i}" for i in range(10))
+        mapping = {f"https://t.co/s{i}": f"https://site{i}.dev" for i in range(10)}
+        text, _ = render.expand_links(stubs, ["https://only-five.dev"] * 5, mapping)
+        self.assertNotIn("t.co/", text)
+        self.assertIn("https://site9.dev", text)
+
+    def test_self_link_is_dropped_not_expanded(self):
+        text = "看了这个视频 https://x.com/who/status/999/video/1"
+        self.assertEqual(render.strip_self_links(text, ["999"]), "看了这个视频")
+
+    def test_author_link_survives_its_closing_paren(self):
+        text = "[@who](https://x.com/who/status/999)\n\n正文"
+        self.assertEqual(render.strip_self_links(text, ["999"]), text)
+
+    def test_internal_x_navigation_is_dropped(self):
+        text = "在 https://x.com/i/jf/onboarding/web?mode=login 看"
+        self.assertEqual(render.strip_self_links(text, []), "在  看")
+
+    def test_rewrite_links_leaves_the_layout_alone(self):
+        text = "[@who](https://x.com/who/status/999)\n\n正文 https://t.co/zzz"
+        out = render.rewrite_links(text, {"https://t.co/zzz": "https://real.dev"})
+        self.assertEqual(out, "[@who](https://x.com/who/status/999)\n\n正文 https://real.dev")
+
+    def test_resolved_stub_is_rendered_inline(self):
+        card = render.render_tweet(
+            tweet(text="看这个\nhttps://t.co/abc123", urls=[], media=[]),
+            links={"https://t.co/abc123": "https://github.com/kokonut-labs/kokonutui"},
+            saved_at=SAVED_AT,
+        )
+        self.assertIn("https://github.com/kokonut-labs/kokonutui", card)
+        self.assertNotIn("t.co/", card)
+
     def test_unused_links_drops_media_status_and_inline(self):
         links = render.unused_links(
             "正文已含 https://inline.dev",
@@ -128,6 +162,13 @@ class Media(unittest.TestCase):
 
 
 class Quoting(unittest.TestCase):
+    def test_quote_that_evaporates_is_not_rendered(self):
+        quote = {"id": "444", "text": "https://t.co/self", "author": {"screenName": "a", "name": "A"}}
+        card = render.render_tweet(
+            tweet(quotedTweet=quote), links={"https://t.co/self": "https://x.com/a/status/444"}, saved_at=SAVED_AT
+        )
+        self.assertNotIn("> **@a**", card)
+
     def test_every_line_is_quoted(self):
         block = render.quoted_block(
             tweet(quotedTweet={"id": "9", "text": "第一段\n\n第二段", "author": {"screenName": "lonely", "name": "Lonely"}})

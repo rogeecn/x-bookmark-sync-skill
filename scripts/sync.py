@@ -18,6 +18,7 @@ Typical incremental run:  plan -> (agent writes titles+tags in plan.json) -> pub
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import http.client
 import json
 import os
@@ -137,6 +138,46 @@ def memo_text(memo: dict) -> str:
     return ""
 
 
+def memo_subject_id(text: str) -> str | None:
+    """The tweet a memo is about: our footer first, then the legacy leading author link."""
+    stripped = text.lstrip()
+    from_footer = PROVENANCE_ID_RE.findall(stripped)
+    if from_footer:
+        return from_footer[-1]
+    leading = LEADING_ID_RE.match(stripped.split("\n", 1)[0])
+    return leading.group(1) if leading else None
+
+
+def memo_saved_at(text: str) -> datetime | None:
+    """The archive date already printed on the memo, so a repair does not rewrite history."""
+    found = re.search(r"存档 (\d{4}-\d{2}-\d{2})", text)
+    if not found:
+        return None
+    try:
+        return datetime.fromisoformat(found.group(1)).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def memo_headline(text: str) -> str:
+    """The agent-written or auto-extracted `### headline` line, so a repair keeps it."""
+    for line in text.lstrip().split("\n"):
+        if line.startswith("### "):
+            return line[4:].strip()
+        if line.strip() and not line.startswith(("#", ">", "!", "[")):
+            return ""
+    return ""
+
+
+def memo_id(memo: dict) -> str:
+    """Accept `memos/<id>` (API shape) or a bare id."""
+    for key in ("name", "id"):
+        value = memo.get(key)
+        if isinstance(value, str) and value:
+            return value.rsplit("/", 1)[-1]
+    return ""
+
+
 def memo_tweet_ids(memos: Path, scan_limit: int, tag: str) -> set[str]:
     """Every tweet id referenced by an existing memo — the second dedupe source.
 
@@ -163,6 +204,78 @@ def memos_publish(memos: Path, markdown: str, tags: list[str], visibility: str |
     if visibility:
         cmd += ["--visibility", visibility]
     return run_json(cmd, stdin=markdown)
+
+
+# ---------------------------------------------------------------- t.co stubs
+
+TCO_STUB_RE = re.compile(r"https?://t\.co/[A-Za-z0-9]+")
+LINK_UA = "Mozilla/5.0 (X11; Linux x86_64) x-bookmark-sync/1.0"
+LINK_CACHE = Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")).expanduser() / "x-bookmark-sync" / "tco.json"
+
+
+def load_link_cache() -> dict[str, str]:
+    try:
+        return json.loads(LINK_CACHE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_link_cache(cache: dict[str, str]) -> None:
+    try:
+        LINK_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        LINK_CACHE.write_text(json.dumps(cache, ensure_ascii=False, indent=0, sort_keys=True), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _proxy_url(proxy: str) -> str:
+    """socks5h, so DNS happens at the proxy: t.co does not resolve usefully from here."""
+    return proxy.replace("socks5://", "socks5h://", 1) if proxy.startswith("socks5://") else proxy
+
+
+def _curl_target(stub: str, proxy: str) -> str | None:
+    try:
+        completed = subprocess.run(
+            [
+                "curl", "-sS", "-L", "-o", "/dev/null", "-m", "15",
+                "-A", LINK_UA, "-x", _proxy_url(proxy), "-w", "%{url_effective}", stub,
+            ],
+            capture_output=True, text=True, timeout=25,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    target = completed.stdout.strip()
+    if not target or target.rstrip("/") == stub.rstrip("/") or "/t.co/" in target:
+        return None
+    return target
+
+
+def resolve_stubs(stubs: list[str], proxy: str | None, workers: int = 8) -> dict[str, str]:
+    """Follow every t.co redirect once and remember it; unresolved stubs are simply absent.
+
+    t.co is only reachable through the proxy. Without one the caller keeps the
+    stub (it still redirects for a human) instead of guessing a target.
+    """
+    cache = load_link_cache()
+    wanted = list(dict.fromkeys(stub for stub in stubs if stub))
+    todo = [stub for stub in wanted if stub not in cache]
+    if todo and proxy:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            targets = list(pool.map(lambda stub: _curl_target(stub, proxy), todo))
+        resolved = {stub: target for stub, target in zip(todo, targets) if target}
+        if resolved:
+            cache.update(resolved)
+            save_link_cache(cache)
+    return {stub: cache[stub] for stub in wanted if stub in cache}
+
+
+def tweet_stubs(tweets: list[dict]) -> list[str]:
+    stubs = []
+    for tweet in tweets:
+        stubs.extend(TCO_STUB_RE.findall(tweet.get("text") or ""))
+        quoted = tweet.get("quotedTweet") or {}
+        stubs.extend(TCO_STUB_RE.findall(quoted.get("text") or ""))
+    return stubs
 
 
 # ---------------------------------------------------------------------- ledger
@@ -345,6 +458,14 @@ def cmd_plan(args) -> int:
     synced_memos = memo_tweet_ids(memos, args.scan_limit, args.tag)
     known = synced_ledger | synced_memos
 
+    links: dict[str, str] = {}
+    if not args.no_resolve:
+        proxy = args.proxy or os.environ.get("TWITTER_PROXY")
+        pending = [tweet for tweet in tweets if str(tweet["id"]) not in known]
+        links = resolve_stubs(tweet_stubs(pending), proxy)
+        if pending and not proxy:
+            print("warn: no proxy (TWITTER_PROXY / --proxy), t.co stubs stay unresolved", file=sys.stderr)
+
     items = []
     for tweet in tweets:
         if str(tweet["id"]) in known:
@@ -367,11 +488,13 @@ def cmd_plan(args) -> int:
         "project": ledger.project if ledger.enabled else None,
         "tag": args.tag,
         "ledger": "ok" if ledger.enabled and synced_ledger else ("empty" if ledger.enabled else "disabled"),
+        "links": links,
         "counts": {
             "bookmarks": len(tweets),
             "synced_ledger": len(synced_ledger),
             "synced_memos": len(synced_memos),
             "new": len(items),
+            "links_resolved": len(links),
         },
         "items": items,
     }
@@ -379,6 +502,85 @@ def cmd_plan(args) -> int:
     out.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({"ok": True, "plan": str(out), **plan["counts"]}, ensure_ascii=False))
     return 0
+
+
+def cmd_repair(args) -> int:
+    """Re-render memos that already exist, in place — layout upgrades without republishing.
+
+    Only memos whose tweet is still in the bookmark list can be repaired: the
+    tweet object is the source of the layout, and refetching it one by one is
+    both slower and less complete than reading the bookmark page.
+    """
+    memos = memos_script(args.memos)
+    tweets = {str(tweet.get("id")): tweet for tweet in fetch_bookmarks(twitter_bin(args.twitter), args.count)}
+    proxy = args.proxy or os.environ.get("TWITTER_PROXY")
+    fallback_saved_at = datetime.now(timezone.utc)
+
+    candidates = []
+    for memo in memos_list(memos, args.scan_limit, args.tag):
+        text = memo_text(memo)
+        tweet_id = memo_subject_id(text)
+        if args.links_only:
+            if "https://t.co/" not in text:
+                continue
+            candidates.append((memo, tweets.get(tweet_id or ""), text))
+            continue
+        if not tweet_id or tweet_id not in tweets:
+            continue
+        if "https://t.co/" not in text and not args.force:
+            continue
+        candidates.append((memo, tweets[tweet_id], text))
+    if args.limit:
+        candidates = candidates[: args.limit]
+
+    stubs: list[str] = []
+    for _memo, tweet, text in candidates:
+        stubs.extend(render.TCO_RE.findall(text))
+        if tweet:
+            stubs.extend(tweet_stubs([tweet]))
+    links = resolve_stubs(stubs, proxy)
+    updated, unchanged, failed = [], 0, []
+    for index, (memo, tweet, text) in enumerate(candidates, 1):
+        memo_ref = memo_id(memo)
+        try:
+            if args.links_only:
+                # historical memos open with the author link; only the stubs are rewritten
+                markdown = render.rewrite_links(text, links)
+            else:
+                markdown = render.render_tweet(
+                    tweet,
+                    title=memo_headline(text) or None,
+                    tags=[tag for tag in (memo.get("tags") or []) if tag not in render.DEFAULT_TAGS],
+                    saved_at=memo_saved_at(text) or fallback_saved_at,
+                    links=links,
+                )
+            if markdown.strip() == text.strip():
+                unchanged += 1
+                continue
+            subject = memo_subject_id(text) or (str(tweet.get("id")) if tweet else "")
+            if args.dry_run:
+                print(f"--- {memo_ref} ({subject})")
+                print(markdown)
+                continue
+            result = run_json(
+                [sys.executable, str(memos), "update", memo_ref, "--file", "-", "--json"], stdin=markdown
+            )
+            if not result.get("ok", True):
+                raise SystemExit(str(result.get("error") or result))
+            updated.append({"memo": memo_ref, "tweet": subject})
+            print(f"[{index}/{len(candidates)}] repaired {memo_ref}", file=sys.stderr)
+        except (SystemExit, Exception) as exc:  # one bad memo must not stop the pass
+            failed.append({"memo": memo_ref, "error": str(exc)})
+            print(f"[{index}/{len(candidates)}] FAILED {memo_ref}: {exc}", file=sys.stderr)
+        time.sleep(args.delay)
+
+    print(
+        json.dumps(
+            {"ok": not failed, "candidates": len(candidates), "updated": len(updated), "unchanged": unchanged, "failed": failed},
+            ensure_ascii=False,
+        )
+    )
+    return 0 if not failed else 1
 
 
 def cmd_publish(args) -> int:
@@ -389,6 +591,7 @@ def cmd_publish(args) -> int:
     plan_path = Path(args.plan)
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     saved_at = datetime.now(timezone.utc)
+    links = plan.get("links") or {}
 
     # Re-check the ledger once, so re-running an old plan cannot double-publish.
     known = {item.get("id") for item in ledger.existing() if item.get("id")}
@@ -415,6 +618,7 @@ def cmd_publish(args) -> int:
                 article=article,
                 saved_at=saved_at,
                 auto_tags=args.auto_tags,
+                links=links,
             )
             if args.dry_run:
                 published.append({"id": tweet_id, "dry_run": True})
@@ -475,6 +679,7 @@ def cmd_publish(args) -> int:
 
 def cmd_render(args) -> int:
     plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
+    links = plan.get("links") or {}
     wanted = set(args.id or [])
     for item in plan.get("items", []):
         if wanted and str(item["id"]) not in wanted:
@@ -489,6 +694,7 @@ def cmd_render(args) -> int:
                 tags=item.get("tags") or [],
                 article=article,
                 auto_tags=args.auto_tags,
+                links=links,
             )
         )
         print("\n" + "-" * 60 + "\n")
@@ -513,7 +719,19 @@ def build_parser() -> argparse.ArgumentParser:
     plan = sub.add_parser("plan", help="fetch bookmarks and write a plan of unsynced ones")
     plan.add_argument("--count", type=int, default=60, help="how many bookmarks to fetch (default: 60)")
     plan.add_argument("--out", default="plan.json", help="plan output path (default: plan.json)")
+    plan.add_argument("--proxy", help="proxy for t.co resolution (default: $TWITTER_PROXY)")
+    plan.add_argument("--no-resolve", action="store_true", help="leave t.co stubs unexpanded")
     plan.set_defaults(func=cmd_plan)
+
+    repair = sub.add_parser("repair", help="re-render existing memos in place (layout upgrades)")
+    repair.add_argument("--count", type=int, default=200, help="how many bookmarks to load as source (default: 200)")
+    repair.add_argument("--limit", type=int, help="repair at most N memos this run")
+    repair.add_argument("--force", action="store_true", help="re-render even memos without t.co stubs")
+    repair.add_argument("--links-only", action="store_true", help="only swap t.co for real URLs, keep the existing layout")
+    repair.add_argument("--dry-run", action="store_true", help="print the new markdown instead of updating")
+    repair.add_argument("--delay", type=float, default=0.3, help="seconds between updates (default: 0.3)")
+    repair.add_argument("--proxy", help="proxy for t.co resolution (default: $TWITTER_PROXY)")
+    repair.set_defaults(func=cmd_repair)
 
     publish = sub.add_parser("publish", help="publish planned items and record them in the ledger")
     publish.add_argument("--plan", default="plan.json")
