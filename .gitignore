@@ -1,6 +1,7 @@
 # Runtime artifacts (plans and reports are per-run snapshots, not source)
 plan*.json
 report*.json
+sync-report.json
 
 # Python
 __pycache__/

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -32,6 +33,14 @@ BARE_URL_LINE_RE = re.compile(r"^<?https?://\S+>?$")
 SENTENCE_END = "。！？!?…"
 # Lines twitter-cli prepends to an article dump; the byline already carries them.
 ARTICLE_META_RE = re.compile(r"^- (?:Author|Published|URL|Likes|Retweets|Replies|Bookmarks|Views):", re.I)
+
+# memos rejects an oversized memo outright (HTTP 429, MEMO_CONTENT_BYTES), and the
+# limit is on bytes, not characters: Chinese prose costs ~3 bytes per char, so a
+# 5000-character article is already 15 KB. The article fold is capped to what is
+# left of the budget instead of blowing up the publish.
+MEMO_BYTE_LIMIT = int(os.environ.get("MEMOS_MAX_BYTES") or 8192)
+# Fold chrome (`<details>`, summary line, trailing blanks) the cap has to leave room for.
+ARTICLE_CHROME_BYTES = 220
 
 DEFAULT_TAGS = ("Twitter", "Bookmark")
 
@@ -391,12 +400,15 @@ def quoted_block(tweet: dict, links: dict[str, str] | None = None) -> str:
     return quote_block(f"{attribution}{link}\n\n{demote_headings(squeeze(text))}")
 
 
-def article_block(article: str | None, headline: str = "") -> str:
+def article_block(article: str | None, headline: str = "", max_bytes: int | None = None) -> str:
     """Full article text folds away: the card stays scannable, the archive stays complete.
 
     `twitter article -m` prefixes a metadata bullet list (author/published/counts)
     that the card's byline already states, and repeats the title as an H1 that the
     card title already says. Both are stripped so the fold opens on real prose.
+
+    `max_bytes` caps the folded body (see MEMO_BYTE_LIMIT). Truncation is honest:
+    the summary counts what is shown, and a closing line says how much was left.
     """
     if not article or not article.strip():
         return ""
@@ -418,7 +430,25 @@ def article_block(article: str | None, headline: str = "") -> str:
     body = squeeze(demote_headings("\n".join(([kept_title] if kept_title else []) + lines[index:])))
     if not body:
         return ""
-    return f"<details><summary>📄 全文 · {len(body)} 字</summary>\n\n{body}\n\n</details>"
+    total = len(body)
+    if max_bytes is not None and len(body.encode("utf-8")) > max_bytes:
+        body = truncate_bytes(body, max_bytes)
+        if not body.strip():
+            return ""
+        body += f"\n\n…（原文 {total} 字，此处保留前 {len(body)} 字；完整文章见原推）"
+    return f"<details><summary>📄 全文 · {total} 字</summary>\n\n{body}\n\n</details>"
+
+
+def truncate_bytes(text: str, max_bytes: int) -> str:
+    """Cut text to at most `max_bytes` of UTF-8, on a paragraph or line boundary."""
+    if max_bytes <= 0:
+        return ""
+    cut = text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+    for separator in ("\n\n", "\n", "。"):
+        head = cut.rfind(separator)
+        if head > len(cut) // 2:
+            return cut[: head + len(separator)].rstrip()
+    return cut.rstrip()
 
 
 # ------------------------------------------------------------------- the layout
@@ -494,21 +524,28 @@ def render_tweet(
         blocks.append("**🔗 链接**")
         blocks.extend(links)
 
-    # 7. Long-form article, folded.
-    article_md = article_block(article, headline)
-    if article_md:
-        blocks.append(article_md)
-
     # 8. Provenance, then tags. Tags last so the tag row stays the visible footer.
-    blocks.append(" · ".join([f"[原推]({tweet_url(tweet)})", f"存档 {saved_at.strftime('%Y-%m-%d')}"]))
+    footer = [
+        " · ".join([f"[原推]({tweet_url(tweet)})", f"存档 {saved_at.strftime('%Y-%m-%d')}"]),
+    ]
 
     tag_names = list(DEFAULT_TAGS)
     for tag in (tags or []) + (suggest_tags(tweet) if auto_tags else []):
         cleaned = normalize_tag(tag)
         if cleaned and cleaned.lower() not in {t.lower() for t in tag_names}:
             tag_names.append(cleaned)
-    blocks.append(" ".join(f"#{tag}" for tag in tag_names))
+    footer.append(" ".join(f"#{tag}" for tag in tag_names))
 
+    # 7. Long-form article, folded — and capped to whatever the memo budget still
+    #    allows. The footers are already counted, so the cap cannot push the memo
+    #    over the instance's per-memo byte limit.
+    if article and article.strip():
+        used = len("\n\n".join([*blocks, *footer]).encode("utf-8"))
+        article_md = article_block(article, headline, max_bytes=MEMO_BYTE_LIMIT - used - ARTICLE_CHROME_BYTES)
+        if article_md:
+            blocks.append(article_md)
+
+    blocks.extend(footer)
     return squeeze("\n\n".join(block for block in blocks if block and block.strip()))
 
 

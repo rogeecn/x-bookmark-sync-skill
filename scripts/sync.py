@@ -45,6 +45,11 @@ LEDGER_SELFTEST_PROJECT = "x-bookmark-skill-selftest"
 # bookmarked tweet as synced just because it was once quoted.
 LEADING_ID_RE = re.compile(r"^\[[^\]]*\]\(https?://(?:x|twitter)\.com/[^/)]+/status/(\d+)\)")
 PROVENANCE_ID_RE = re.compile(r"\[原推\]\(https?://(?:x|twitter)\.com/[^/)]+/status/(\d+)\)")
+# X long-form articles are filtered out of the sync entirely: the tweet's only payload
+# is a 5k+ character article that the instance refuses (8192-byte memo limit), and the
+# truncated version of it was worse than nothing. Detected by the article URL the
+# tweet carries, or by an `articleTitle` (which only ever accompanies one).
+ARTICLE_URL_RE = re.compile(r"https?://(?:x|twitter)\.com/i/article/\d+")
 
 
 # ------------------------------------------------------------------ discovery
@@ -389,28 +394,22 @@ def ledger_from_env(args) -> Ledger:
 # ------------------------------------------------------------------ bookmarks
 
 
+def is_article_tweet(tweet: dict) -> bool:
+    """True for an X long-form article post — filtered, never published.
+
+    The article body is the content and is far past the instance's per-memo byte
+    limit, so the only publishable form was a truncated stub. Dropped instead.
+    """
+    if (tweet.get("articleTitle") or "").strip():
+        return True
+    haystack = [str(tweet.get("text") or ""), *(tweet.get("urls") or [])]
+    return any(ARTICLE_URL_RE.search(str(item)) for item in haystack)
+
+
 def fetch_bookmarks(twitter: str, count: int) -> list[dict]:
     data = run_json([twitter, "bookmarks", "-n", str(count), "--json"], timeout=300)
     tweets = data.get("data") or data.get("items") or []
     return [tweet for tweet in tweets if tweet.get("id")]
-
-
-def article_markdown(twitter: str, tweet_id: str) -> str | None:
-    """Only tweets carrying an articleTitle have one; failures stay non-fatal."""
-    try:
-        proc = subprocess.run(
-            [twitter, "article", str(tweet_id), "-m"],
-            text=True,
-            capture_output=True,
-            timeout=120,
-        )
-    except subprocess.TimeoutExpired:
-        return None
-    if proc.returncode != 0:
-        return None
-    body = proc.stdout.strip()
-    return body or None
-
 
 # ------------------------------------------------------------------ commands
 
@@ -467,18 +466,30 @@ def cmd_plan(args) -> int:
             print("warn: no proxy (TWITTER_PROXY / --proxy), t.co stubs stay unresolved", file=sys.stderr)
 
     items = []
+    filtered = []
     for tweet in tweets:
         if str(tweet["id"]) in known:
+            continue
+        if is_article_tweet(tweet):
+            # Articles are not synced at all (see ARTICLE_URL_RE): a stub with the
+            # body cut off at the byte limit wasted the reader's click.
+            filtered.append(
+                {
+                    "id": str(tweet["id"]),
+                    "reason": "article",
+                    "title": (tweet.get("articleTitle") or "").strip(),
+                    "url": f"https://x.com/{((tweet.get('author') or {}).get('screenName') or 'i')}/status/{tweet['id']}",
+                }
+            )
             continue
         headline, _body = render.split_lead(render.squeeze(tweet.get("text") or ""))
         items.append(
             {
                 "id": str(tweet["id"]),
                 "tweet": tweet,
-                "title": (tweet.get("articleTitle") or "").strip() or headline,
+                "title": headline,
                 "tags": [],
                 "suggested_tags": render.suggest_tags(tweet),
-                "has_article": bool(tweet.get("articleTitle")),
                 "status": "new",
             }
         )
@@ -494,9 +505,11 @@ def cmd_plan(args) -> int:
             "synced_ledger": len(synced_ledger),
             "synced_memos": len(synced_memos),
             "new": len(items),
+            "filtered_article": len(filtered),
             "links_resolved": len(links),
         },
         "items": items,
+        "filtered": filtered,
     }
     out = Path(args.out)
     out.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -594,7 +607,6 @@ def cmd_repair(args) -> int:
 def cmd_publish(args) -> int:
     memos = memos_script(args.memos)
     ledger = ledger_from_env(args)
-    twitter = twitter_bin(args.twitter) if args.articles else None
 
     plan_path = Path(args.plan)
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -604,9 +616,15 @@ def cmd_publish(args) -> int:
     # Re-check the ledger once, so re-running an old plan cannot double-publish.
     known = {item.get("id") for item in ledger.existing() if item.get("id")}
     for item in plan.get("items", []):
-        if item.get("status", "new") == "new" and str(item["id"]) in known:
+        if item.get("status", "new") != "new":
+            continue
+        if str(item["id"]) in known:
             item["status"] = "skip"
             item["skip_reason"] = "already in ledger"
+        elif is_article_tweet(item.get("tweet") or {}):
+            # Old plans predate the filter; an article stub is not worth publishing.
+            item["status"] = "skip"
+            item["skip_reason"] = "article filtered"
 
     published, skipped, failed = [], [], []
     pending = [item for item in plan.get("items", []) if item.get("status", "new") == "new"]
@@ -616,14 +634,10 @@ def cmd_publish(args) -> int:
     for index, item in enumerate(pending, 1):
         tweet_id = str(item["id"])
         try:
-            article = None
-            if twitter and item.get("has_article"):
-                article = article_markdown(twitter, tweet_id)
             markdown = render.render_tweet(
                 item["tweet"],
                 title=item.get("title") or None,
                 tags=item.get("tags") or [],
-                article=article,
                 saved_at=saved_at,
                 auto_tags=args.auto_tags,
                 links=links,
@@ -693,8 +707,8 @@ def cmd_render(args) -> int:
         if wanted and str(item["id"]) not in wanted:
             continue
         article = None
-        if args.articles:
-            article = article_markdown(twitter_bin(args.twitter), str(item["id"]))
+        if args.article_file:
+            article = Path(args.article_file).read_text(encoding="utf-8")
         print(
             render.render_tweet(
                 item["tweet"],
@@ -747,7 +761,6 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--tag-list", nargs="*", default=[], help="extra tags for every memo")
     publish.add_argument("--visibility", choices=["private", "protected", "public"], help="default: instance default")
     publish.add_argument("--auto-tags", action="store_true", help="append suggested topic tags")
-    publish.add_argument("--articles", action="store_true", help="fetch full article text for article tweets")
     publish.add_argument("--limit", type=int, help="publish at most N items this run")
     publish.add_argument("--delay", type=float, default=0.3, help="seconds between publishes (default: 0.3)")
     publish.add_argument("--dry-run", action="store_true", help="print the markdown instead of publishing")
@@ -757,7 +770,7 @@ def build_parser() -> argparse.ArgumentParser:
     preview = sub.add_parser("render", help="print planned items' markdown")
     preview.add_argument("--plan", default="plan.json")
     preview.add_argument("--id", action="append", help="only this tweet id (repeatable)")
-    preview.add_argument("--articles", action="store_true")
+    preview.add_argument("--article-file", help="fold this article markdown into the preview (debugging only)")
     preview.add_argument("--auto-tags", action="store_true")
     preview.set_defaults(func=cmd_render)
 

@@ -322,6 +322,26 @@ class FullCard(unittest.TestCase):
     def test_empty_article_renders_nothing(self):
         self.assertNotIn("<details>", render.render_tweet(tweet(), article="   ", saved_at=SAVED_AT))
 
+    def test_long_article_is_capped_to_the_memo_byte_limit(self):
+        # memos rejects memos over MEMO_CONTENT_BYTES with HTTP 429; a Chinese article
+        # is ~3 bytes per character, so a 5000-character dump must be truncated.
+        body = "\n\n".join(["这是文章正文的一句话，用来把字节数堆上去。"] * 400)
+        md = render.render_tweet(tweet(articleTitle="标题"), article=body, saved_at=SAVED_AT)
+        self.assertLessEqual(len(md.encode("utf-8")), render.MEMO_BYTE_LIMIT)
+        self.assertIn("完整文章见原推", md)
+        self.assertIn("<details>", md)
+
+    def test_short_article_is_not_truncated(self):
+        md = render.render_tweet(tweet(), article="# 长文\n\n正文" * 3, saved_at=SAVED_AT)
+        self.assertNotIn("完整文章见原推", md)
+
+    def test_truncate_bytes_keeps_utf8_intact(self):
+        text = "中文字符" * 100
+        cut = render.truncate_bytes(text, 10)
+        self.assertLessEqual(len(cut.encode("utf-8")), 10)
+        self.assertEqual(cut, cut.encode("utf-8").decode("utf-8"))
+        self.assertEqual(render.truncate_bytes(text, 0), "")
+
     def test_extra_tags_dedupe_and_normalise(self):
         md = render.render_tweet(tweet(), tags=["前端", "#Twitter", "two words"], saved_at=SAVED_AT)
         tag_line = md.split("\n")[-1]

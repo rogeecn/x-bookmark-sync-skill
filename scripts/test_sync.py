@@ -74,6 +74,24 @@ class StubResolution(unittest.TestCase):
         self.assertEqual(sync.tweet_stubs(tweets), ["https://t.co/one", "https://t.co/two"])
 
 
+class ArticleFilter(unittest.TestCase):
+    """X long-form articles are dropped, never truncated into a stub memo."""
+
+    def test_article_title_marks_it(self):
+        self.assertTrue(sync.is_article_tweet({"id": "1", "text": "https://t.co/x", "articleTitle": "标题"}))
+
+    def test_article_url_marks_it(self):
+        tweet = {"id": "1", "text": "https://t.co/x", "urls": ["https://x.com/i/article/2122744091620593664"]}
+        self.assertTrue(sync.is_article_tweet(tweet))
+
+    def test_ordinary_tweet_is_not_an_article(self):
+        tweet = {"id": "1", "text": "正文", "urls": ["https://github.com/rogeecn/memos-skill"]}
+        self.assertFalse(sync.is_article_tweet(tweet))
+
+    def test_empty_title_does_not_mark_it(self):
+        self.assertFalse(sync.is_article_tweet({"id": "1", "text": "正文", "articleTitle": "   "}))
+
+
 class LedgerResilience(unittest.TestCase):
     """A flaky ledger must never turn a published memo into a reported failure."""
 

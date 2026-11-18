@@ -11,7 +11,7 @@ description: Sync X (Twitter) bookmarks into Memos as designed cards, incrementa
 
 | 依赖 | 负责 | 调用方式 |
 | --- | --- | --- |
-| [twitter-cli](https://github.com/public-clis/twitter-cli) | 书签/推文/长文数据 | `twitter bookmarks -n N --json`、`twitter article <id> -m` |
+| [twitter-cli](https://github.com/public-clis/twitter-cli) | 书签/推文数据 | `twitter bookmarks -n N --json` |
 | [memos skill](https://github.com/rogeecn/memos-skill) | 发布、列表、标签解析 | `python3 <memos>/scripts/memos.py publish --file - --json` |
 | [id-ledger-query](https://github.com/rogeecn/cf-id-ledger/tree/main/skills/id-ledger-query) | 已同步 id 台账 | `Ledger` 类（`scripts/sync.py`），`POST/GET /v1/projects/<key>/ids` |
 
@@ -63,9 +63,17 @@ python3 scripts/sync.py publish --plan plan.json
 
 第三道闸在 `publish` 里：开跑前再读一次台账，把已在台账的 item 标成 `skip`（原因 `already in ledger`）。所以拿一份旧的 `plan.json` 重跑也不会重复发布。**唯一会破坏契约的做法是绕过 `sync.py` 直接调 memos 发。**
 
+### 文章类书签：不发，直接过滤
+
+X 长文（推文正文只有一个指向 `x.com/i/article/<id>` 的短链）**不进 memos**。`plan` 就把它们分到 `plan.json` 的 `filtered[]`（`reason: "article"`，带标题和原推链接），`counts.filtered_article` 会报数；`publish` 遇到旧 plan 里残留的文章 item 也会 `skip`（原因 `article filtered`）。
+
+原因：文章本体动辄 5000+ 字，中文 UTF-8 下就是 15 KB，而实例单条 memo 上限 8192 字节（`MEMO_CONTENT_BYTES`，超了直接 HTTP 429）。截断后发出去只是一张残文卡片，不如不发。**需要归档文章就去 X 看，或者手动处理。**
+
+`render.py` 里的 `<details>` 折叠与字节限额保留（长推文也会碰上 8192 字节），但 `sync.py` 不再拉文章全文：`render --article-file <file>` 只用于调试预览。
+
 ### agent 在这一步做什么（这是排版的价值所在）
 
-`plan` 给出的每条 item 已经带了机器可算的东西：`title`（自动抽取）、`suggested_tags`（从正文/链接匹配出的历史词表标签）、`has_article`（是否值得多拉一次全文）。读 `plan.json`，然后**只改你认为该改的**：
+`plan` 给出的每条 item 已经带了机器可算的东西：`title`（自动抽取）、`suggested_tags`（从正文/链接匹配出的历史词表标签）。读 `plan.json`，然后**只改你认为该改的**：
 
 - `title`：自动标题只做**抽取**（推文自己的首行或第一句），不理解内容，约 8% 的长单段推文抽不出标题、`title` 为空。读完正文，用一句说清「这条到底给了什么」的话替换或补上（≤30 字，中文）。数据型/工具型/观点型各有各的写法，别都用「分享一个…」开头；空着比写假标题好。
 - `tags`：从 `suggested_tags` 里挑，或按内容补 0–2 个**已存在于归档**的标签。宁缺勿滥，超过 3 个就没有区分度了。
@@ -89,7 +97,6 @@ python3 scripts/sync.py publish --plan plan.json
 🎬 [视频 · 1920×1080](video.twimg.com/...)
 **🔗 链接**
 https://github.com/...                       ← 裸 URL 独占段落 → memos 渲染成预览卡
-<details><summary>📄 全文 · 4820 字</summary>
 [原推](url) · 存档 2026-11-17
 #Twitter #Bookmark #github
 ```
@@ -138,9 +145,6 @@ python3 scripts/sync.py render --plan plan.json --metrics
 # 想要机器自动补主题标签（默认关：标签是判断，不是正则的活）
 python3 scripts/sync.py publish --plan plan.json --auto-tags
 
-# 拉长文全文折进卡片（慢，每条多一次请求）
-python3 scripts/sync.py publish --plan plan.json --articles
-
 # 改台账项目 key（默认 x-bookmark）
 python3 scripts/sync.py --ledger-project my-project plan
 
@@ -161,6 +165,7 @@ twitter bookmarks -n 20 --json | python3 scripts/render.py --id 2122286309855338
 | `plan` 报 `no proxy` | 没配 `TWITTER_PROXY`，t.co 出不去 | 配代理，或接受短链降级（只做 `urls[]` 1:1 展开） |
 | 媒体图不显示 | 读者侧访问不到 `pbs.twimg.com` | 不要改成下载上传（本机同样出网受限）；改为在正文补一句图片描述 |
 | 某条 publish 失败 | 单条数据异常 | 循环不会中断，失败的 item 标 `failed` 写进 `sync-report.json`，修好数据后把它改回 `"new"` 重跑 |
+| `publish` 报 HTTP 429 `MEMO_CONTENT_BYTES` | 一条 memo 超 8192 字节（中文长文极易超） | `render.py` 已按字节限额截断全文；实例限额不同就设 `MEMOS_MAX_BYTES`。历史 memo 超限可用 `repair --in-place` 瘦身 |
 | 台账写入失败 | 台账服务抖动 | 默认降级：警告后继续（memo 扫描兜底），memo 已发出但 id 未记账 → 重跑 `seed` 补回；要强制失败加 `--strict-ledger` |
 
 `sync-report.json` 记录了每条的结果（`published` / `failed` / `skipped` + 原因），收尾时读它汇报，不要凭记忆。
